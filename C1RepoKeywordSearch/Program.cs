@@ -2,7 +2,7 @@
 using System.Diagnostics;
 using C1RepoKeywordSearch;
 
-Console.WriteLine("=== C1 Solution Search ===");
+Console.WriteLine("=== C1 Repo Keyword Search ===");
 Console.WriteLine();
 
 // Prompt for repo root

@@ -19,7 +19,7 @@ public static class ScanLogger
 
         using var writer = new StreamWriter(logPath);
 
-        writer.WriteLine("=== C1 Solution Search - Scan Report ===");
+        writer.WriteLine("=== C1 Repo Keyword Search - Scan Report ===");
         writer.WriteLine($"Timestamp     : {timestamp:yyyy-MM-dd HH:mm:ss} UTC");
         writer.WriteLine($"Repo Path     : {repoPath}");
         writer.WriteLine($"Commit ID     : {gitInfo?.CommitId ?? "N/A"}");
