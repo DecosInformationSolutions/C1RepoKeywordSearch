@@ -1,0 +1,14 @@
+# Scan output logs
+*_scan.log
+
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Rider
+.idea/
