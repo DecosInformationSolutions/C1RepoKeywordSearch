@@ -12,6 +12,19 @@ public static class Scanner
         "bin", "obj", ".git", "node_modules", "packages", ".vs"
     };
 
+    // Names excluded from name-hit matching only — their contents are still scanned
+    private static readonly HashSet<string> SkippedNameMatches = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "wwwroot"
+    };
+
+    private static List<string> _whitelistedUrls = [];
+
+    public static void LoadWhitelistedUrls(IEnumerable<string> urls)
+    {
+        _whitelistedUrls = urls.Select(u => u.Trim()).Where(u => u.Length > 0).ToList();
+    }
+
     private static bool IsInSkippedFolder(string path, string repoPath)
     {
         var relative = Path.GetRelativePath(repoPath, path);
@@ -43,6 +56,85 @@ public static class Scanner
             || trimmed.StartsWith("/*")   // block comment start
             || trimmed.StartsWith("<!--") // XML/HTML comment
             || trimmed.StartsWith("#");   // preprocessor / script comment
+    }
+
+    private static bool IsNamespaceOrInjectLine(string line)
+    {
+        var trimmed = line.TrimStart();
+        return trimmed.StartsWith("using ")      // C# using directive
+            || trimmed.StartsWith("namespace ")  // C# namespace declaration
+            || trimmed.StartsWith("@using ")     // Razor @using directive
+            || trimmed.StartsWith("@inject ")    // Razor @inject directive
+            || trimmed.Contains("xmlns=")        // XML/SVG/XAML namespace attribute
+            || trimmed.Contains("xmlns:");       // XML/SVG/XAML prefixed namespace attribute
+    }
+
+    private static readonly Regex XmlnsAttributePattern = new(@"xmlns(:\w+)?\s*=\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex CssClassSelectorPattern = new(@"\.[a-zA-Z0-9_-]+", RegexOptions.Compiled);
+    private static readonly Regex HtmlClassAttributePattern = new(@"class\s*=\s*['""'][^'""']*['""']", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Returns true if the match is inside a CSS class selector or HTML class attribute
+    private static bool IsCssClassContext(string line, int matchIndex)
+    {
+        // CSS selector: .my-class { ... }
+        var selectorMatches = CssClassSelectorPattern.Matches(line);
+        foreach (Match m in selectorMatches)
+        {
+            if (matchIndex >= m.Index && matchIndex < m.Index + m.Length)
+                return true;
+        }
+
+        // HTML class attribute: class="my-class"
+        var attrMatches = HtmlClassAttributePattern.Matches(line);
+        foreach (Match m in attrMatches)
+        {
+            int valueStart = m.Value.IndexOf('=') + 1;
+            if (valueStart > 0)
+            {
+                // Find the start and end of the quoted value
+                char quote = m.Value[valueStart];
+                int start = m.Index + valueStart + 1;
+                int end = m.Index + m.Value.Length - 1;
+                if (matchIndex >= start && matchIndex < end)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool IsUrlContext(string line, int matchIndex)
+    {
+        // Find the start of the URL token (walk back to whitespace or quote)
+        int start = matchIndex;
+        while (start > 0 && line[start - 1] != ' ' && line[start - 1] != '"' && line[start - 1] != '\'') start--;
+
+        if (!line[start..].StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !line[start..].StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Extract just the URL — stop at whitespace, quote, or closing bracket
+        int end = start;
+        while (end < line.Length && line[end] != ' ' && line[end] != '"' && line[end] != '\'' && line[end] != '>') end++;
+        var url = line[start..end];
+
+        // xmlns attributes are always harmless namespace identifiers — suppress unconditionally
+        // e.g. xmlns="http://..." or xmlns:xlink="http://..."
+        int quotePos = start - 1;
+        if (quotePos >= 0 && (line[quotePos] == '"' || line[quotePos] == '\''))
+        {
+            var beforeQuote = line[..quotePos].TrimEnd();
+            if (XmlnsAttributePattern.IsMatch(beforeQuote))
+                return true;
+        }
+
+        // Never suppress other URLs with query strings or parameters — namespace URIs don't have them,
+        // but a malicious endpoint could use a trusted prefix to hide credential exfiltration
+        if (url.Contains('?') || url.Contains('='))
+            return false;
+
+        // Only suppress if the URL starts with a whitelisted prefix
+        return _whitelistedUrls.Any(u => url.StartsWith(u, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool HasHardcodedStringValue(string line, int matchIndex)
@@ -213,10 +305,10 @@ public static class Scanner
             onProgress?.Invoke(current, total, Path.GetFileName(entry));
             var name = Path.GetFileName(entry);
 
-            // Match on folder/file name
+            // Match on folder/file name (skip known infrastructure names like wwwroot)
             foreach (var keyword in keywords)
             {
-                if (name.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                if (!SkippedNameMatches.Contains(name) && name.Contains(keyword, StringComparison.OrdinalIgnoreCase))
                     matches.Add(new ScanMatch(keyword, entry, "Name", null, null));
             }
 
@@ -244,6 +336,9 @@ public static class Scanner
                             string fullWord = ExtractFullWord(lines[i], matchIndex);
 
                             if (CSharpKeywords.IsKeyword(fullWord)) continue;
+                            if (IsNamespaceOrInjectLine(lines[i])) continue;
+                            if (IsCssClassContext(lines[i], matchIndex)) continue;
+                            if (IsUrlContext(lines[i], matchIndex)) continue;
                             if (IsHtmlTextContent(lines[i], matchIndex)) continue;
                             if (PlaceholderDetector.IsPlaceholder(lines[i], keyword, matchIndex)) continue;
                             var matchType = ClassifyLine(lines[i], keyword);

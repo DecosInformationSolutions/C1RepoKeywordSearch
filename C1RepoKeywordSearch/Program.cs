@@ -28,6 +28,8 @@ catch (Exception ex)
 
 var keywords = keywordConfig.Keywords;
 
+Scanner.LoadWhitelistedUrls(keywordConfig.WhitelistedUrls);
+
 if (keywords.Count == 0)
 {
 	Console.WriteLine("ERROR: No keywords found in file.");
@@ -160,4 +162,93 @@ if (qualifiedKeywords.Count > 0)
 
 string logPath = ScanLogger.Write(repoPath, outputFolder, gitInfo, keywords, matches, skipped, sw.Elapsed, scannedFiles);
 Console.WriteLine($"\nLog written to: {logPath}");
+
+// Prompt to scan another folder or exit
+
+while (true)
+{
+	Console.WriteLine();
+	Console.Write("Scan a different folder? Enter path or press Enter to exit: ");
+	var next = Console.ReadLine()?.Trim().Trim('"');
+
+	if (string.IsNullOrWhiteSpace(next))
+	{
+		Console.Clear();
+		Console.WriteLine("Exiting. Goodbye!");
+		break;
+	}
+
+	if (!Directory.Exists(next))
+	{
+		Console.WriteLine("ERROR: Folder does not exist. Please try again.");
+		continue;
+	}
+
+	repoPath = next;
+
+	var nextGitInfo = GitInfoLoader.TryLoad(repoPath);
+	if (nextGitInfo != null)
+		Console.WriteLine($"Git Commit : {nextGitInfo.CommitId} ({nextGitInfo.Date})");
+	else
+		Console.WriteLine("Git info   : Not available");
+
+	int nextFileCount = Scanner.CountFiles(repoPath);
+	Console.WriteLine($"Files to scan: {nextFileCount:N0}");
+	Console.WriteLine();
+
+	progressRow = Console.CursorTop;
+	Console.WriteLine();
+
+	sw.Restart();
+	(matches, skipped, scannedFiles) = Scanner.Scan(repoPath, keywords, (current, total, fileName) =>
+	{
+		Console.SetCursorPosition(0, progressRow);
+		string truncated = fileName.Length > 50 ? "..." + fileName[^47..] : fileName.PadRight(50);
+		Console.Write($"[{total - current} remaining] {truncated}");
+	});
+	sw.Stop();
+
+	Console.SetCursorPosition(0, progressRow);
+	Console.WriteLine(new string(' ', Console.WindowWidth - 1));
+
+	Console.WriteLine($"Scan complete. {matches.Count} match(es) found in {sw.Elapsed.TotalSeconds:F2}s.");
+
+	qualifiedKeywords = matches
+		.GroupBy(m => m.Keyword, StringComparer.OrdinalIgnoreCase)
+		.Where(g => g.Count() > 1)
+		.Select(g => g.Key)
+		.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+	if (qualifiedKeywords.Count > 0)
+	{
+		Console.WriteLine("\n--- File Summary ---");
+		foreach (var fileGroup in matches.Where(m => qualifiedKeywords.Contains(m.Keyword)).GroupBy(m => m.FilePath))
+		{
+			Console.WriteLine($"  {fileGroup.Key}");
+			foreach (var lineGroup in fileGroup.GroupBy(m => m.LineNumber))
+			{
+				var location = lineGroup.Key.HasValue ? $"Line {lineGroup.Key}" : "Name";
+				var kws = string.Join(", ", lineGroup.Select(m => $"\"{m.Keyword}\"").Distinct());
+				Console.WriteLine($"    [{lineGroup.First().MatchType.ToUpper()}] {kws} | {location}");
+			}
+		}
+
+		Console.WriteLine("\n--- Matches ---");
+		foreach (var fileGroup in matches.Where(m => qualifiedKeywords.Contains(m.Keyword)).GroupBy(m => m.FilePath))
+		{
+			foreach (var lineGroup in fileGroup.GroupBy(m => m.LineNumber))
+			{
+				var first = lineGroup.First();
+				var kws = string.Join(", ", lineGroup.Select(m => $"\"{m.Keyword}\"").Distinct());
+				if (first.MatchType == "Name")
+					Console.WriteLine($"[NAME]    {kws} | {first.FilePath}");
+				else
+					Console.WriteLine($"[{first.MatchType.ToUpper()}] {kws} | {first.FilePath} | Line: {first.LineNumber} | Introduced: {first.BlameCommit ?? "N/A"}");
+			}
+		}
+	}
+
+	logPath = ScanLogger.Write(repoPath, outputFolder, nextGitInfo, keywords, matches, skipped, sw.Elapsed, scannedFiles);
+	Console.WriteLine($"\nLog written to: {logPath}");
+}
 
