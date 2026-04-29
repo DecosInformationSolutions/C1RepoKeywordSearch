@@ -74,32 +74,38 @@ public static class Scanner
     private static readonly Regex CssClassSelectorPattern = new(@"\.[a-zA-Z0-9_-]+", RegexOptions.Compiled);
     private static readonly Regex HtmlClassAttributePattern = new(@"class\s*=\s*['""'][^'""']*['""']", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    // Returns true if the match is inside a CSS class selector or HTML class attribute
-    private static bool IsCssClassContext(string line, int matchIndex)
+    // Returns true if the match is inside a CSS class selector (in CSS/SCSS/LESS) or HTML class attribute (in markup)
+    private static bool IsCssClassContext(string line, int matchIndex, string filePath)
     {
-        // CSS selector: .my-class { ... }
-        var selectorMatches = CssClassSelectorPattern.Matches(line);
-        foreach (Match m in selectorMatches)
+        string ext = Path.GetExtension(filePath).ToLowerInvariant();
+        // Only suppress for CSS/SCSS/LESS files (selectors)
+        if (ext is ".css" or ".scss" or ".less")
         {
-            if (matchIndex >= m.Index && matchIndex < m.Index + m.Length)
-                return true;
-        }
-
-        // HTML class attribute: class="my-class"
-        var attrMatches = HtmlClassAttributePattern.Matches(line);
-        foreach (Match m in attrMatches)
-        {
-            int valueStart = m.Value.IndexOf('=') + 1;
-            if (valueStart > 0)
+            var selectorMatches = CssClassSelectorPattern.Matches(line);
+            foreach (Match m in selectorMatches)
             {
-                // Find the start and end of the quoted value
-                char quote = m.Value[valueStart];
-                int start = m.Index + valueStart + 1;
-                int end = m.Index + m.Value.Length - 1;
-                if (matchIndex >= start && matchIndex < end)
+                if (matchIndex >= m.Index && matchIndex < m.Index + m.Length)
                     return true;
             }
         }
+        // For .razor/.html/.htm, only suppress if inside HTML class attribute
+        if (ext is ".razor" or ".html" or ".htm")
+        {
+            var attrMatches = HtmlClassAttributePattern.Matches(line);
+            foreach (Match m in attrMatches)
+            {
+                int valueStart = m.Value.IndexOf('=') + 1;
+                if (valueStart > 0)
+                {
+                    char quote = m.Value[valueStart];
+                    int start = m.Index + valueStart + 1;
+                    int end = m.Index + m.Value.Length - 1;
+                    if (matchIndex >= start && matchIndex < end)
+                        return true;
+                }
+            }
+        }
+        // Never suppress in .cs or other code files
         return false;
     }
 
@@ -329,18 +335,21 @@ public static class Scanner
                     foreach (var keyword in keywords)
                     {
                         if (IsCommentLine(lines[i])) continue;
-                        if (lines[i].Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                        int searchIndex = 0;
+                        while (searchIndex < lines[i].Length)
                         {
-                            blameMap.TryGetValue(i + 1, out var blameCommit);
-                            int matchIndex = lines[i].IndexOf(keyword, StringComparison.OrdinalIgnoreCase);
-                            string fullWord = ExtractFullWord(lines[i], matchIndex);
+                            int matchIndex = lines[i].IndexOf(keyword, searchIndex, StringComparison.OrdinalIgnoreCase);
+                            if (matchIndex == -1) break;
 
-                            if (CSharpKeywords.IsKeyword(fullWord)) continue;
-                            if (IsNamespaceOrInjectLine(lines[i])) continue;
-                            if (IsCssClassContext(lines[i], matchIndex)) continue;
-                            if (IsUrlContext(lines[i], matchIndex)) continue;
-                            if (IsHtmlTextContent(lines[i], matchIndex)) continue;
-                            if (PlaceholderDetector.IsPlaceholder(lines[i], keyword, matchIndex)) continue;
+                            string fullWord = ExtractFullWord(lines[i], matchIndex);
+                            if (CSharpKeywords.IsKeyword(fullWord)) { searchIndex = matchIndex + keyword.Length; continue; }
+                            if (IsNamespaceOrInjectLine(lines[i])) { searchIndex = matchIndex + keyword.Length; continue; }
+                            if (IsCssClassContext(lines[i], matchIndex, entry)) { searchIndex = matchIndex + keyword.Length; continue; }
+                            if (IsUrlContext(lines[i], matchIndex)) { searchIndex = matchIndex + keyword.Length; continue; }
+                            if (IsHtmlTextContent(lines[i], matchIndex)) { searchIndex = matchIndex + keyword.Length; continue; }
+                            if (PlaceholderDetector.IsPlaceholder(lines[i], keyword, matchIndex)) { searchIndex = matchIndex + keyword.Length; continue; }
+
+                            blameMap.TryGetValue(i + 1, out var blameCommit);
                             var matchType = ClassifyLine(lines[i], keyword);
                             matches.Add(new ScanMatch(
                                 keyword,
@@ -350,6 +359,7 @@ public static class Scanner
                                 null,
                                 blameCommit
                             ));
+                            searchIndex = matchIndex + keyword.Length;
                         }
                     }
                 }
